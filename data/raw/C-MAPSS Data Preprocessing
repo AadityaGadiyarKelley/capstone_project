@@ -1,0 +1,239 @@
+# Cell 1: Basic exploration
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+
+# Load the data
+train_data = pd.read_csv('train_FD001.txt', sep=' ', header=None)
+print(train_data.shape)
+train_data.head()
+
+# Drop the empty columns
+train_data = train_data.drop(columns=[26, 27])
+
+# giving column names meaning
+column_names = ['engine_id', 'cycle', 'setting_1', 'setting_2', 'setting_3'] + [f'sensor_{i}' for i in range(1, 22)]
+train_data.columns = column_names
+
+print(train_data.shape)
+train_data.head()
+
+# Basic engine stats
+print(f"Number of unique engines: {train_data['engine_id'].nunique()}")
+print(f"Engine run lengths:")
+print(train_data.groupby('engine_id')['cycle'].max().describe())
+
+# Engine example
+engine_1_data = train_data[train_data['engine_id'] == 1]
+
+# Sensor readings over its lifetime
+print(f"Engine 1 ran for {engine_1_data['cycle'].max()} cycles")
+print("\nFirst few cycles:")
+print(engine_1_data[['cycle', 'sensor_2', 'sensor_3', 'sensor_4']].head())
+print("\nLast few cycles:")
+print(engine_1_data[['cycle', 'sensor_2', 'sensor_3', 'sensor_4']].tail())
+
+import matplotlib.pyplot as plt
+
+# Plot sensor_4 for engine 1 over its entire lifetime
+plt.figure(figsize=(10, 4))
+plt.plot(engine_1_data['cycle'], engine_1_data['sensor_4'])
+plt.title('Sensor 4 - Engine 1 Over Time')
+plt.xlabel('Cycle')
+plt.ylabel('Sensor 4 Value')
+plt.grid(True)
+plt.show()
+
+# Different sensors for the same engine
+fig, axes = plt.subplots(2, 2, figsize=(12, 8))
+sensors_to_plot = ['sensor_4', 'sensor_7', 'sensor_11', 'sensor_20']
+
+for i, sensor in enumerate(sensors_to_plot):
+    row = i // 2
+    col = i % 2
+    axes[row, col].plot(engine_1_data['cycle'], engine_1_data[sensor])
+    axes[row, col].set_title(f'{sensor} - Engine 1')
+    axes[row, col].set_xlabel('Cycle')
+    axes[row, col].grid(True)
+
+plt.tight_layout()
+plt.show()
+
+# Sliding window for one engine
+def create_windows(engine_data, window_size=30):
+    windows = []
+    for i in range(len(engine_data) - window_size + 1):
+        # Get sensor columns only (skip engine_id, cycle, settings)
+        sensor_cols = [col for col in engine_data.columns if col.startswith('sensor_')]
+        window = engine_data[sensor_cols].iloc[i:i+window_size].values
+        windows.append(window)
+    return np.array(windows)
+
+# Test on engine 1
+engine_1_windows = create_windows(engine_1_data, window_size=30)
+print(f"Created {len(engine_1_windows)} windows")
+print(f"Each window shape: {engine_1_windows[0].shape}")  # Should be (30, 21) - 30 timesteps, 21 sensors
+
+# Compare first window (healthy) vs last window (near failure)
+print("First window (healthy) - average sensor values:")
+print(engine_1_windows[0].mean(axis=0)[:5])  # First 5 sensors
+
+print("\nLast window (near failure) - average sensor values:")
+print(engine_1_windows[-1].mean(axis=0)[:5])  # First 5 sensors
+
+# Windows for all engines
+all_windows = []
+engine_labels = []  # Keep track of which engine each window came from
+
+for engine_id in train_data['engine_id'].unique():
+    engine_data = train_data[train_data['engine_id'] == engine_id]
+    engine_windows = create_windows(engine_data, window_size=30)
+    
+    all_windows.append(engine_windows)
+    engine_labels.extend([engine_id] * len(engine_windows))
+
+# Combine all windows into one array
+all_windows = np.vstack(all_windows)
+print(f"Total windows from all engines: {len(all_windows)}")
+print(f"Shape of each window: {all_windows[0].shape}")
+
+# Create simple labels based on position in engine's lifetime
+labels = []
+
+for engine_id in train_data['engine_id'].unique():
+    engine_data = train_data[train_data['engine_id'] == engine_id]
+    engine_length = len(engine_data)
+    num_windows = engine_length - 30 + 1
+    
+    # Last 30 windows = anomalous (near failure)
+    # Everything else = normal
+    engine_labels = [0] * (num_windows - 30) + [1] * min(30, num_windows)
+    labels.extend(engine_labels)
+
+labels = np.array(labels)
+print(f"Normal windows (label 0): {sum(labels == 0)}")
+print(f"Anomalous windows (label 1): {sum(labels == 1)}")
+
+# Reshape windows from (17000, 30, 21) to (17000, 630)
+# This flattens each window into one long feature vector
+X = all_windows.reshape(len(all_windows), -1)
+
+print(f"Original shape: {all_windows.shape}")
+print(f"Flattened shape: {X.shape}")
+print(f"Each sample now has {X.shape[1]} features")
+
+# Save preprocessing
+np.save('X_features.npy', X)
+np.save('y_labels.npy', labels)
+np.save('engine_labels.npy', engine_labels)
+
+# Load the original NASA data (before windowing)
+train_data = pd.read_csv('train_FD001.txt', sep=' ', header=None)
+train_data = train_data.drop(columns=[26, 27])  # Remove empty columns
+column_names = ['engine_id', 'cycle', 'setting_1', 'setting_2', 'setting_3'] + [f'sensor_{i}' for i in range(1, 22)]
+train_data.columns = column_names
+
+# Calculate max life for each engine
+max_life = train_data.groupby('engine_id')['cycle'].max().reset_index()
+max_life.columns = ['engine_id', 'max_life']
+
+# Merge back and calculate RUL
+train_data = train_data.merge(max_life, on='engine_id')
+train_data['RUL'] = train_data['max_life'] - train_data['cycle']
+
+# Apply the 125 cap
+train_data['RUL'] = train_data['RUL'].clip(upper=125)
+
+print(f"RUL range: {train_data['RUL'].min()} to {train_data['RUL'].max()}")
+print(train_data[['engine_id', 'cycle', 'max_life', 'RUL']].head())
+
+# Create windowed data for RUL regression
+def create_rul_windows(engine_data, window_size=30):
+    windows = []
+    targets = []
+    
+    if len(engine_data) < window_size:
+        return np.array([]), np.array([])
+    
+    for i in range(len(engine_data) - window_size + 1):
+        # Get sensor columns for window
+        sensor_cols = [col for col in engine_data.columns if col.startswith('sensor_')]
+        window = engine_data[sensor_cols].iloc[i:i+window_size].values
+        
+        # Target is RUL at the END of the window
+        target = engine_data['RUL'].iloc[i+window_size-1]
+        
+        windows.append(window.flatten())  # Flatten 30x21 to 630 features
+        targets.append(target)
+    
+    return np.array(windows), np.array(targets)
+
+# Apply to all engines
+all_windows = []
+all_targets = []
+
+for engine_id in train_data['engine_id'].unique():
+    engine_data = train_data[train_data['engine_id'] == engine_id]
+    windows, targets = create_rul_windows(engine_data, window_size=30)
+    if len(windows) > 0:
+        all_windows.append(windows)
+        all_targets.append(targets)
+
+X = np.vstack(all_windows)
+y = np.concatenate(all_targets)
+
+print(f"Windowed data shape: {X.shape}")
+print(f"Each window has {X.shape[1]} features (30 timesteps × 21 sensors)")
+
+# Split into train/test
+from sklearn.model_selection import train_test_split
+X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+
+print(f"Feature matrix shape: {X.shape}")
+print(f"Training set: {X_train.shape[0]} samples")
+print(f"Test set: {X_test.shape[0]} samples")
+print(f"RUL target range: {y.min():.1f} to {y.max():.1f}")
+
+from sklearn.ensemble import RandomForestRegressor
+from sklearn.metrics import mean_squared_error, mean_absolute_error
+import time
+
+# Train Random Forest with established parameters from literature
+start = time.time()
+rf_model = RandomForestRegressor(
+    n_estimators=500,
+    min_samples_leaf=1,
+    max_features='sqrt',
+    n_jobs=-1,
+    random_state=42
+)
+rf_model.fit(X_train, y_train)
+end_train = time.time()
+
+# Make predictions
+y_pred = rf_model.predict(X_test)
+
+# Calculate comprehensive performance metrics
+r2_score = rf_model.score(X_test, y_test)
+rmse = mean_squared_error(y_test, y_pred, squared=False)
+mae = mean_absolute_error(y_test, y_pred)
+
+print(f"=== Random Forest Baseline Results ===")
+print(f"R² Score: {r2_score:.4f} ({r2_score:.2%})")
+print(f"RMSE: {rmse:.2f} cycles")
+print(f"MAE: {mae:.2f} cycles")
+print(f"Training time: {end_train-start:.3f}s")
+print(f"Data points: {len(X_train)} training, {len(X_test)} testing")
+
+
+feature_importance = rf_model.feature_importances_
+top_features = sorted(enumerate(feature_importance), 
+                     key=lambda x: x[1], reverse=True)[:10]
+for i, (feature_idx, importance) in enumerate(top_features):
+    print(f"  #{i+1}: Feature {feature_idx} - {importance:.4f} ({importance*100:.2f}%)")
+    
+# Show the distribution
+print(f"\nFeature Importance Distribution:")
+print(f"  Top feature contributes: {max(feature_importance)*100:.2f}%")
+print(f"  Top 10 features contribute: {sum([imp for _, imp in top_features])*100:.1f}%")
+print(f"  Features with >0.1% importance: {sum(1 for imp in feature_importance if imp > 0.001)}")
